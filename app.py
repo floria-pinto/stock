@@ -1,60 +1,64 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import tensorflow as tf
-import joblib
-from sklearn.preprocessing import MinMaxScaler
+import datetime
+import plotly.graph_objects as go
+from lstm_model import predict_stock  # Assuming you have an LSTM model function
 
-# Load trained LSTM model and scaler
-model = tf.keras.models.load_model("lstm_model.h5")
-scaler = joblib.load("scaler.pkl")
+# Sidebar - Select Stock
+st.sidebar.title("Stocks")
+selected_stock = st.sidebar.text_input("Enter Stock Symbol (e.g., TCS.NS)", "TCS.NS")
 
-# Sidebar Navigation
-st.sidebar.title("Stocky AI")
-st.sidebar.markdown("### Navigation")
-pages = ["Home", "Charts", "Sectors", "Stocks", "Alerts", "Portfolio", "Settings", "Watchlist", "Help", "About Us"]
-for page in pages:
-    st.sidebar.button(page)
-st.sidebar.button("Logout")
+def fetch_stock_data(stock_symbol, period="6mo"):
+    stock = yf.Ticker(stock_symbol)
+    data = stock.history(period=period, interval='1d')
+    return data
 
-# Main Title
-st.title("Stock Sector Predictions")
+# Get stock data
+data = fetch_stock_data(selected_stock)
 
-# Example Stock Data (Replace with real stock market API or database)
-sectors = [
-    "NIFTY FIN_SERVICE", "NIFTY AUTO", "NIFTY CONSUM", "NIFTY ENERGY", 
-    "NIFTY FMCG", "NIFTY IT", "NIFTY MEDIA", "NIFTY METAL", 
-    "NIFTY PSUBANK", "NIFTY REALTY", "NIFTY SERVICE", "NIFTY LDX", "NIFTY BANK"
-]
+# Display Stock Name & Current Price
+st.title(f"{selected_stock} Stock Analysis")
+st.metric("Current Price", f"₹{data['Close'].iloc[-1]:.2f}")
 
-# Generate random closing prices for demo (Replace with real prices)
-np.random.seed(42)
-closing_prices = np.random.uniform(1500, 2500, len(sectors))
+# Time Period Selection
+period = st.selectbox("Select Time Period", ["1mo", "3mo", "6mo", "1y", "5y", "max"], index=2)
+data = fetch_stock_data(selected_stock, period)
 
-# Predict Next Price using LSTM Model
-def predict_price(price):
-    scaled_input = scaler.transform(np.array([[price]]))
-    prediction = model.predict(np.array([scaled_input]))
-    predicted_price = scaler.inverse_transform(prediction)
-    return predicted_price[0][0]
+# Predict Future Prices using LSTM
+predicted_prices = predict_stock(data['Close'])
+data['Prediction'] = np.nan  # Placeholder
 
-# Create DataFrame with Buy/Sell signals
-data = []
-for sector, price in zip(sectors, closing_prices):
-    pred_price = predict_price(price)
-    ema_20 = "Buy ↑" if pred_price > price else "Sell ↓"
-    ema_50 = "Buy ↑" if pred_price > price * 1.02 else "Sell ↓"
-    ema_100 = "Buy ↑" if pred_price > price * 1.05 else "Sell ↓"
-    ema_200 = "Buy ↑" if pred_price > price * 1.10 else "Sell ↓"
-    data.append([sector, ema_20, ema_50, ema_100, ema_200])
+# Assign predictions to last n values
+last_n = len(predicted_prices)
+data.iloc[-last_n:, data.columns.get_loc('Prediction')] = predicted_prices
 
-df = pd.DataFrame(data, columns=["Sector", "EMA 20", "EMA 50", "EMA 100", "EMA 200"])
+# Buy/Sell Signal Logic
+short_window = 9
+long_window = 21
+data['Short_MA'] = data['Close'].rolling(window=short_window).mean()
+data['Long_MA'] = data['Close'].rolling(window=long_window).mean()
+data['Buy_Signal'] = (data['Short_MA'] > data['Long_MA']) & (data['Short_MA'].shift(1) <= data['Long_MA'].shift(1))
+data['Sell_Signal'] = (data['Short_MA'] < data['Long_MA']) & (data['Short_MA'].shift(1) >= data['Long_MA'].shift(1))
 
-# Apply Color Formatting
-def color_ema(val):
-    return "background-color: green; color: white" if "Buy" in val else "background-color: red; color: white"
+# Plot Stock Chart
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=data.index,
+    open=data['Open'],
+    high=data['High'],
+    low=data['Low'],
+    close=data['Close'],
+    name='Market Data'
+))
+fig.add_trace(go.Scatter(x=data.index, y=data['Prediction'], mode='lines', name='LSTM Prediction', line=dict(color='blue')))
+fig.add_trace(go.Scatter(x=data.index, y=data['Short_MA'], mode='lines', name='Short MA', line=dict(color='green')))
+fig.add_trace(go.Scatter(x=data.index, y=data['Long_MA'], mode='lines', name='Long MA', line=dict(color='red')))
 
-styled_df = df.style.applymap(color_ema, subset=["EMA 20", "EMA 50", "EMA 100", "EMA 200"])
+# Buy/Sell Markers
+fig.add_trace(go.Scatter(x=data.index[data['Buy_Signal']], y=data['Close'][data['Buy_Signal']], mode='markers', marker=dict(color='green', size=10), name='Buy Signal'))
+fig.add_trace(go.Scatter(x=data.index[data['Sell_Signal']], y=data['Close'][data['Sell_Signal']], mode='markers', marker=dict(color='red', size=10), name='Sell Signal'))
 
-# Display Table
-st.dataframe(styled_df, height=600, width=800)
+fig.update_layout(title=f"{selected_stock} Price Chart", xaxis_title='Date', yaxis_title='Stock Price (₹)')
+st.plotly_chart(fig)
