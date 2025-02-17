@@ -6,5 +6,7 @@ pandas
 scikit-learn
 matplotlib
 yfinance
+plotly
+
 
 
